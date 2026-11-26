@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    Added support for always-on tracing in OSProfiler. Operators can now configure
+    ``always_trace = True`` and optionally ``trace_sample_rate`` (float between 0.0
+    and 1.0, default 1.0) under the ``[profiler]`` section or in WSGI middleware
+    configuration. When enabled, incoming HTTP requests without valid tracing
+    headers (``X-Trace-Info`` / ``X-Trace-HMAC``) will automatically initiate a new
+    root trace span using the configured ``hmac_keys``, allowing automatic
+    distributed tracing across all OpenStack services without requiring client-side
+    HMAC keys.

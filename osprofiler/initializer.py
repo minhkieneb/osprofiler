@@ -51,6 +51,10 @@ def init_from_conf(
         **kwargs,
     )
     notifier.set(_notifier)
-    web.enable(conf.profiler.hmac_keys)
+    web.enable(
+        conf.profiler.hmac_keys,
+        always_trace=getattr(conf.profiler, "always_trace", False),
+        trace_sample_rate=getattr(conf.profiler, "trace_sample_rate", 1.0),
+    )
     if conf.profiler.trace_requests:
         requests.enable()

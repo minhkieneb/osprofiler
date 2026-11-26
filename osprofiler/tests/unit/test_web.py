@@ -67,6 +67,8 @@ class WebMiddlewareTestCase(test.TestCase):
         profiler.clean()
         # it's default state of _ENABLED param, so let's set it here
         web._ENABLED = None
+        web._ALWAYS_TRACE = None
+        web._TRACE_SAMPLE_RATE = None
         self.addCleanup(profiler.clean)
 
     def tearDown(self):
@@ -302,9 +304,192 @@ class WebMiddlewareTestCase(test.TestCase):
             hmac_key=hmac_key, base_id="1", parent_id="2"
         )
 
+    @mock.patch("osprofiler.web.profiler.Trace")
+    @mock.patch("osprofiler.web.profiler.init")
+    def test_wsgi_middleware_always_trace_no_headers(
+        self, mock_profiler_init, mock_profiler_trace
+    ):
+        request = mock.MagicMock()
+        request.get_response.return_value = "yeah!"
+        request.path = "/v2.1/servers"
+        request.query_string = ""
+        request.method = "GET"
+        request.scheme = "http"
+        request.headers = {"a": "1"}
+
+        web.enable("my_secret_key", always_trace=True)
+        middleware = web.WsgiMiddleware(mock.ANY, enabled=True)
+        self.assertEqual("yeah!", middleware(request))
+
+        mock_profiler_init.assert_called_once()
+        call_kwargs = mock_profiler_init.call_args[1]
+        self.assertEqual("my_secret_key", call_kwargs["hmac_key"])
+        self.assertIsNotNone(call_kwargs["base_id"])
+        self.assertIsNone(call_kwargs["parent_id"])
+
+        mock_profiler_trace.assert_called_once_with(
+            "wsgi",
+            info={
+                "request": {
+                    "path": "/v2.1/servers",
+                    "query": "",
+                    "method": "GET",
+                    "scheme": "http",
+                }
+            },
+        )
+
+    @mock.patch("osprofiler.web.profiler.init")
+    def test_wsgi_middleware_always_trace_kube_probe(self, mock_profiler_init):
+        request = mock.MagicMock()
+        request.get_response.return_value = "yeah!"
+        request.headers = {"User-Agent": "kube-probe/1.28"}
+
+        middleware = web.WsgiMiddleware(
+            mock.ANY,
+            hmac_keys="key1",
+            enabled=True,
+            always_trace=True,
+        )
+        self.assertEqual("yeah!", middleware(request))
+        mock_profiler_init.assert_not_called()
+
+    @mock.patch("osprofiler.web.profiler.init")
+    def test_wsgi_middleware_always_trace_w3c_traceparent(
+        self, mock_profiler_init
+    ):
+        request = mock.MagicMock()
+        request.get_response.return_value = "yeah!"
+        request.path = "/v2.1/servers"
+        request.query_string = ""
+        request.method = "GET"
+        request.scheme = "http"
+        request.headers = {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        }
+
+        middleware = web.WsgiMiddleware(
+            mock.ANY,
+            hmac_keys="key1",
+            enabled=True,
+            always_trace=True,
+        )
+        self.assertEqual("yeah!", middleware(request))
+
+        mock_profiler_init.assert_called_once_with(
+            hmac_key="key1",
+            base_id="4bf92f3577b34da6a3ce929d0e0e4736",
+            parent_id="000000000000000000f067aa0ba902b7",
+        )
+
+    @mock.patch("osprofiler.web.profiler.init")
+    def test_wsgi_middleware_always_trace_via_init(self, mock_profiler_init):
+        request = mock.MagicMock()
+        request.get_response.return_value = "yeah!"
+        request.path = "/v2.1/servers"
+        request.query_string = ""
+        request.method = "GET"
+        request.scheme = "http"
+        request.headers = {}
+
+        middleware = web.WsgiMiddleware(
+            mock.ANY,
+            hmac_keys="key1,key2",
+            enabled=True,
+            always_trace=True,
+        )
+        self.assertEqual("yeah!", middleware(request))
+
+        mock_profiler_init.assert_called_once()
+        call_kwargs = mock_profiler_init.call_args[1]
+        self.assertEqual("key1", call_kwargs["hmac_key"])
+        self.assertIsNotNone(call_kwargs["base_id"])
+        self.assertIsNone(call_kwargs["parent_id"])
+
+    @mock.patch("osprofiler.web.profiler.init")
+    def test_wsgi_middleware_always_trace_invalid_headers(
+        self, mock_profiler_init
+    ):
+        request = mock.MagicMock()
+        request.get_response.return_value = "yeah!"
+        request.path = "/path"
+        request.query_string = ""
+        request.method = "GET"
+        request.scheme = "http"
+        request.headers = {
+            "X-Trace-Info": "invalid-info",
+            "X-Trace-HMAC": "invalid-hmac",
+        }
+
+        middleware = web.WsgiMiddleware(
+            mock.ANY,
+            hmac_keys="default_key",
+            enabled=True,
+            always_trace=True,
+        )
+        self.assertEqual("yeah!", middleware(request))
+
+        mock_profiler_init.assert_called_once()
+        call_kwargs = mock_profiler_init.call_args[1]
+        self.assertEqual("default_key", call_kwargs["hmac_key"])
+        self.assertIsNotNone(call_kwargs["base_id"])
+        self.assertIsNone(call_kwargs["parent_id"])
+
+    @mock.patch("osprofiler.web.profiler.init")
+    def test_wsgi_middleware_always_trace_preserves_valid_trace(
+        self, mock_profiler_init
+    ):
+        hmac_key = "secret_key"
+        pack = utils.signed_pack(
+            {"base_id": "root-123", "parent_id": "span-456"}, hmac_key
+        )
+        request = mock.MagicMock()
+        request.get_response.return_value = "yeah!"
+        request.path = "/path"
+        request.query_string = ""
+        request.method = "GET"
+        request.scheme = "http"
+        request.headers = {
+            "X-Trace-Info": pack[0],
+            "X-Trace-HMAC": pack[1],
+        }
+
+        middleware = web.WsgiMiddleware(
+            mock.ANY,
+            hmac_keys=hmac_key,
+            enabled=True,
+            always_trace=True,
+        )
+        self.assertEqual("yeah!", middleware(request))
+
+        mock_profiler_init.assert_called_once_with(
+            hmac_key=hmac_key, base_id="root-123", parent_id="span-456"
+        )
+
+    @mock.patch("osprofiler.web.profiler.init")
+    def test_wsgi_middleware_always_trace_sampling_zero(
+        self, mock_profiler_init
+    ):
+        request = mock.MagicMock()
+        request.get_response.return_value = "yeah!"
+        request.headers = {}
+
+        middleware = web.WsgiMiddleware(
+            mock.ANY,
+            hmac_keys="key1",
+            enabled=True,
+            always_trace=True,
+            trace_sample_rate=0.0,
+        )
+        self.assertEqual("yeah!", middleware(request))
+        mock_profiler_init.assert_not_called()
+
     def test_disable(self):
+        web.enable(always_trace=True, trace_sample_rate=0.5)
         web.disable()
         self.assertFalse(web._ENABLED)
+        self.assertFalse(web._ALWAYS_TRACE)
+        self.assertEqual(1.0, web._TRACE_SAMPLE_RATE)
 
     def test_enabled(self):
         web.disable()

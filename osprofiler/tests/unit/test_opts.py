@@ -32,6 +32,8 @@ class ConfigTestCase(test.TestCase):
         opts.set_defaults(CONF)
         self.assertFalse(CONF.profiler.enabled)
         self.assertFalse(CONF.profiler.trace_sqlalchemy)
+        self.assertFalse(CONF.profiler.always_trace)
+        self.assertEqual(1.0, CONF.profiler.trace_sample_rate)
         self.assertEqual("SECRET_KEY", CONF.profiler.hmac_keys)
         self.assertFalse(opts.is_trace_enabled(CONF))
         self.assertFalse(opts.is_db_trace_enabled(CONF))
@@ -42,9 +44,13 @@ class ConfigTestCase(test.TestCase):
             enabled=True,
             trace_sqlalchemy=True,
             hmac_keys="MY_KEY",
+            always_trace=True,
+            trace_sample_rate=0.5,
         )
         self.assertTrue(CONF.profiler.enabled)
         self.assertTrue(CONF.profiler.trace_sqlalchemy)
+        self.assertTrue(CONF.profiler.always_trace)
+        self.assertEqual(0.5, CONF.profiler.trace_sample_rate)
         self.assertEqual("MY_KEY", CONF.profiler.hmac_keys)
         self.assertTrue(opts.is_trace_enabled(CONF))
         self.assertTrue(opts.is_db_trace_enabled(CONF))
@@ -64,5 +70,26 @@ class ConfigTestCase(test.TestCase):
         opts.set_defaults(CONF, enabled=True, hmac_keys="MY_KEY")
         opts.enable_web_trace(CONF)
         opts.disable_web_trace(CONF)
-        mock_enable.assert_called_once_with("MY_KEY")
+        mock_enable.assert_called_once_with(
+            "MY_KEY", always_trace=False, trace_sample_rate=1.0
+        )
+        mock_disable.assert_called_once_with()
+
+    @mock.patch("osprofiler.web.enable")
+    @mock.patch("osprofiler.web.disable")
+    def test_web_trace_enabled_with_always_trace(
+        self, mock_disable, mock_enable
+    ):
+        opts.set_defaults(
+            CONF,
+            enabled=True,
+            hmac_keys="MY_KEY",
+            always_trace=True,
+            trace_sample_rate=0.8,
+        )
+        opts.enable_web_trace(CONF)
+        opts.disable_web_trace(CONF)
+        mock_enable.assert_called_once_with(
+            "MY_KEY", always_trace=True, trace_sample_rate=0.8
+        )
         mock_disable.assert_called_once_with()

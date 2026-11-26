@@ -104,6 +104,29 @@ information from all possible resources.
 """,
 )
 
+_always_trace_opt = cfg.BoolOpt(
+    "always_trace",
+    default=False,
+    help="""
+Enable always-on tracing for all incoming requests even if no profiling
+headers (X-Trace-Info and X-Trace-HMAC) are provided in the request.
+
+Possible values:
+
+* True: Automatically trace all incoming requests.
+* False: Only trace requests with valid X-Trace-Info and X-Trace-HMAC headers.
+""",
+)
+
+_trace_sample_rate_opt = cfg.FloatOpt(
+    "trace_sample_rate",
+    default=1.0,
+    help="""
+Sample rate for always-on tracing. Value between 0.0 and 1.0 (default 1.0).
+1.0 means 100% of requests are traced.
+""",
+)
+
 _connection_string_opt = cfg.StrOpt(
     "connection_string",
     default="messaging://",
@@ -190,6 +213,8 @@ _PROFILER_OPTS: list[cfg.Opt] = [
     _trace_sqlalchemy_opt,
     _trace_requests_opt,
     _hmac_keys_opt,
+    _always_trace_opt,
+    _trace_sample_rate_opt,
     _connection_string_opt,
     _es_doc_type_opt,
     _es_scroll_time_opt,
@@ -254,6 +279,8 @@ def set_defaults(
     enabled: bool | None = None,
     trace_sqlalchemy: bool | None = None,
     hmac_keys: str | None = None,
+    always_trace: bool | None = None,
+    trace_sample_rate: float | None = None,
     connection_string: str | None = None,
     es_doc_type: str | None = None,
     es_scroll_time: str | None = None,
@@ -274,6 +301,16 @@ def set_defaults(
     if hmac_keys is not None:
         conf.set_default(
             "hmac_keys", hmac_keys, group=_profiler_opt_group.name
+        )
+    if always_trace is not None:
+        conf.set_default(
+            "always_trace", always_trace, group=_profiler_opt_group.name
+        )
+    if trace_sample_rate is not None:
+        conf.set_default(
+            "trace_sample_rate",
+            trace_sample_rate,
+            group=_profiler_opt_group.name,
         )
 
     if connection_string is not None:
@@ -327,7 +364,11 @@ def enable_web_trace(conf: cfg.ConfigOpts | None = None) -> None:
     if conf is None:
         conf = cfg.CONF
     if conf.profiler.enabled:
-        web.enable(conf.profiler.hmac_keys)
+        web.enable(
+            conf.profiler.hmac_keys,
+            always_trace=conf.profiler.always_trace,
+            trace_sample_rate=conf.profiler.trace_sample_rate,
+        )
 
 
 def disable_web_trace(conf: cfg.ConfigOpts | None = None) -> None:

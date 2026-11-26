@@ -37,6 +37,12 @@ else:
     def send(self: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
         parsed_url = parser.urlparse(request.url)
 
+        # Prevent recursive tracing of OTLP exporter HTTP POST requests to OpenTelemetry Collector
+        if "opentelemetry" in (parsed_url.hostname or "") or str(parsed_url.port) in ("4318", "10428"):
+            if _FUNC is None:
+                raise RuntimeError("osprofiler requests adapter not initialized")
+            return _FUNC(self, request, *args, **kwargs)
+
         # Best effort guessing port if needed
         port: int | str = parsed_url.port or ""
         if not port and parsed_url.scheme == "http":

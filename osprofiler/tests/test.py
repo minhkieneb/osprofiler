@@ -16,13 +16,18 @@
 from oslo_config import cfg
 from oslo_config import fixture as config_fixture
 
-from oslotest import base
+try:
+    from oslotest import base
+    TestCaseBase = base.BaseTestCase
+except ImportError:
+    import testtools
+    TestCaseBase = testtools.TestCase
 
 
 CONF = cfg.CONF
 
 
-class TestCase(base.BaseTestCase):
+class TestCase(TestCaseBase):
     """Test case base class for all osprofiler unit tests."""
 
     def setUp(self):

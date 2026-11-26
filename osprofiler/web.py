@@ -15,8 +15,11 @@
 
 from __future__ import annotations
 
+import random
 from typing import Any, TypeGuard, TYPE_CHECKING
 
+from oslo_utils import strutils
+from oslo_utils import uuidutils
 import webob.dec
 
 from osprofiler import _utils as utils
@@ -50,6 +53,8 @@ def get_trace_id_headers() -> dict[str, str]:
 
 _ENABLED: bool | None = None
 _HMAC_KEYS: list[str] | tuple[str, ...] | None = None
+_ALWAYS_TRACE: bool | None = None
+_TRACE_SAMPLE_RATE: float | None = None
 
 
 def disable() -> None:
@@ -58,15 +63,23 @@ def disable() -> None:
     This is the alternative way to disable middleware. It will be used to be
     able to disable middleware via oslo.config.
     """
-    global _ENABLED
+    global _ENABLED, _ALWAYS_TRACE, _TRACE_SAMPLE_RATE
     _ENABLED = False
+    _ALWAYS_TRACE = False
+    _TRACE_SAMPLE_RATE = 1.0
 
 
-def enable(hmac_keys: str | None = None) -> None:
+def enable(
+    hmac_keys: str | None = None,
+    always_trace: bool = False,
+    trace_sample_rate: float = 1.0,
+) -> None:
     """Enable middleware."""
-    global _ENABLED, _HMAC_KEYS
+    global _ENABLED, _HMAC_KEYS, _ALWAYS_TRACE, _TRACE_SAMPLE_RATE
     _ENABLED = True
     _HMAC_KEYS = utils.split(hmac_keys or "")
+    _ALWAYS_TRACE = always_trace
+    _TRACE_SAMPLE_RATE = trace_sample_rate
 
 
 class WsgiMiddleware:
@@ -77,6 +90,8 @@ class WsgiMiddleware:
         application: WSGIApplication,
         hmac_keys: str | None = None,
         enabled: bool = False,
+        always_trace: bool = False,
+        trace_sample_rate: float = 1.0,
         **kwargs: Any,
     ) -> None:
         """Initialize middleware with api-paste.ini arguments.
@@ -88,6 +103,8 @@ class WsgiMiddleware:
                     by only those who knows this key which helps
                     avoid DDOS.
         :enabled: This middleware can be turned off fully if enabled is False.
+        :always_trace: Enable always-on tracing for all incoming requests.
+        :trace_sample_rate: Sample rate for always-on tracing (0.0 to 1.0).
         :kwargs: Other keyword arguments.
                  NOTE(tovin07): Currently, this `kwargs` is not used at all.
                  It's here to avoid some extra keyword arguments in local_conf
@@ -97,6 +114,15 @@ class WsgiMiddleware:
         self.name = "wsgi"
         self.enabled = enabled
         self.hmac_keys = utils.split(hmac_keys or "")
+        self.always_trace = always_trace or strutils.bool_from_string(
+            str(kwargs.get("always_trace", False))
+        )
+        try:
+            self.trace_sample_rate = float(
+                kwargs.get("trace_sample_rate", trace_sample_rate)
+            )
+        except (ValueError, TypeError):
+            self.trace_sample_rate = 1.0
 
     @classmethod
     def factory(
@@ -131,14 +157,56 @@ class WsgiMiddleware:
         ):
             return request.get_response(self.application)
 
-        trace_info = utils.signed_unpack(
-            request.headers.get(X_TRACE_INFO),
-            request.headers.get(X_TRACE_HMAC),
-            _HMAC_KEYS or self.hmac_keys,
-        )
+        trace_info = None
+        x_trace_info = request.headers.get(X_TRACE_INFO)
+        x_trace_hmac = request.headers.get(X_TRACE_HMAC)
+        keys = _HMAC_KEYS or self.hmac_keys
+
+        if x_trace_info and x_trace_hmac:
+            trace_info = utils.signed_unpack(
+                x_trace_info,
+                x_trace_hmac,
+                keys,
+            )
 
         if not self._trace_is_valid(trace_info):
-            return request.get_response(self.application)
+            # Skip tracing for kubernetes health probes to avoid spamming spans
+            if request.headers.get("User-Agent", "").startswith("kube-probe"):
+                return request.get_response(self.application)
+
+            always_trace = (
+                _ALWAYS_TRACE
+                if _ALWAYS_TRACE is not None
+                else self.always_trace
+            )
+            sample_rate = (
+                _TRACE_SAMPLE_RATE
+                if _TRACE_SAMPLE_RATE is not None
+                else self.trace_sample_rate
+            )
+
+            if not always_trace:
+                return request.get_response(self.application)
+
+            if sample_rate < 1.0 and random.random() >= sample_rate:
+                return request.get_response(self.application)
+
+            default_hmac_key = keys[0] if keys else "openstack-profiler"
+            # Support W3C traceparent header (e.g. from Ingress / Gateway / Envoy)
+            tp = request.headers.get("traceparent")
+            if tp and len(tp.split("-")) >= 4:
+                parts = tp.split("-")
+                trace_info = {
+                    "base_id": parts[1],
+                    "parent_id": parts[2].zfill(32),
+                    "hmac_key": default_hmac_key,
+                }
+            else:
+                trace_info = {
+                    "hmac_key": default_hmac_key,
+                    "base_id": str(uuidutils.generate_uuid()),
+                    "parent_id": None,
+                }
 
         profiler.init(
             hmac_key=trace_info["hmac_key"],

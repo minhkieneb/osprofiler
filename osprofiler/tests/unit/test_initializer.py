@@ -26,6 +26,8 @@ class InitializerTestCase(test.TestCase):
         conf = mock.Mock()
         conf.profiler.connection_string = "driver://"
         conf.profiler.hmac_keys = "hmac_keys"
+        conf.profiler.always_trace = False
+        conf.profiler.trace_sample_rate = 1.0
         context: dict[object, object] = {}
         project = "my-project"
         service = "my-service"
@@ -45,4 +47,6 @@ class InitializerTestCase(test.TestCase):
             conf=conf,
         )
         notifier_set_mock.assert_called_once_with(notifier_mock)
-        web_enable_mock.assert_called_once_with("hmac_keys")
+        web_enable_mock.assert_called_once_with(
+            "hmac_keys", always_trace=False, trace_sample_rate=1.0
+        )
