@@ -206,6 +206,16 @@ class UtilsTestCase(test.TestCase):
 
         self.assertEqual(expected, result)
 
+    def test_shorten_id_with_w3c_16_hex(self):
+        w3c_span_id = "00f067aa0ba902b7"
+        expected = int(w3c_span_id, 16)
+        self.assertEqual(expected, utils.shorten_id(w3c_span_id))
+
+    def test_uuid_to_int128_with_w3c_32_hex(self):
+        w3c_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736"
+        expected = int(w3c_trace_id, 16)
+        self.assertEqual(expected, utils.uuid_to_int128(w3c_trace_id))
+
     def test_itersubclasses(self):
 
         class A:

@@ -191,10 +191,17 @@ def import_modules_from_package(package: str) -> None:
 
 
 def shorten_id(span_id: str | int) -> int:
-    """Convert from uuid4 to 64 bit id for OpenTracing"""
+    """Convert from uuid4 or W3C 16-hex string to 64 bit id for OpenTracing/OTel."""
     int64_max = (1 << 64) - 1
     if isinstance(span_id, int):
         return span_id & int64_max
+    if isinstance(span_id, str):
+        hex_id = span_id.replace("-", "")
+        if len(hex_id) in (16, 32):
+            try:
+                return int(hex_id, 16) & int64_max
+            except ValueError:
+                pass
     try:
         short_id = uuid.UUID(span_id).int & int64_max
     except ValueError:
@@ -204,9 +211,16 @@ def shorten_id(span_id: str | int) -> int:
 
 
 def uuid_to_int128(span_uuid: str | int) -> int:
-    """Convert from uuid4 to 128 bit id for OpenTracing"""
+    """Convert from uuid4 or W3C 32-hex string to 128 bit id for OpenTracing/OTel."""
     if isinstance(span_uuid, int):
         return span_uuid
+    if isinstance(span_uuid, str):
+        hex_id = span_uuid.replace("-", "")
+        if len(hex_id) == 32:
+            try:
+                return int(hex_id, 16)
+            except ValueError:
+                pass
     try:
         span_int = uuid.UUID(span_uuid).int
     except ValueError:

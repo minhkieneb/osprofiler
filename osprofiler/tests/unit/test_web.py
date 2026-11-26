@@ -43,8 +43,10 @@ class WebTestCase(test.TestCase):
         profiler.init("key", base_id="y", parent_id="z")
         headers = web.get_trace_id_headers()
         self.assertEqual(
-            sorted(headers.keys()), sorted(["X-Trace-Info", "X-Trace-HMAC"])
+            sorted(headers.keys()),
+            sorted(["X-Trace-Info", "X-Trace-HMAC", "traceparent"]),
         )
+        self.assertTrue(headers["traceparent"].startswith("00-"))
 
         trace_info = utils.signed_unpack(
             headers["X-Trace-Info"], headers["X-Trace-HMAC"], ["key"]
@@ -53,6 +55,26 @@ class WebTestCase(test.TestCase):
         self.assertIn("hmac_key", trace_info)
         self.assertEqual("key", trace_info.pop("hmac_key"))
         self.assertEqual({"parent_id": "z", "base_id": "y"}, trace_info)
+
+    def test_extract_w3c_context(self):
+        headers = {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        }
+        trace_id, parent_id = web.extract_w3c_context(headers)
+        self.assertEqual("4bf92f3577b34da6a3ce929d0e0e4736", trace_id)
+        self.assertEqual("00f067aa0ba902b7", parent_id)
+
+    def test_extract_w3c_context_invalid(self):
+        self.assertEqual((None, None), web.extract_w3c_context({}))
+        self.assertEqual((None, None), web.extract_w3c_context({"traceparent": "invalid"}))
+        self.assertEqual((None, None), web.extract_w3c_context({"traceparent": "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}))
+
+    def test_generate_traceparent(self):
+        tp = web.generate_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", sampled=True)
+        self.assertEqual("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", tp)
+
+        tp_unsampled = web.generate_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", sampled=False)
+        self.assertEqual("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00", tp_unsampled)
 
     @mock.patch("osprofiler.profiler.get")
     def test_get_trace_id_headers_no_profiler(self, mock_get_profiler):
@@ -372,14 +394,14 @@ class WebMiddlewareTestCase(test.TestCase):
             mock.ANY,
             hmac_keys="key1",
             enabled=True,
-            always_trace=True,
+            always_trace=False,
         )
         self.assertEqual("yeah!", middleware(request))
 
         mock_profiler_init.assert_called_once_with(
             hmac_key="key1",
-            base_id="4bf92f3577b34da6a3ce929d0e0e4736",
-            parent_id="000000000000000000f067aa0ba902b7",
+            base_id="4bf92f35-77b3-4da6-a3ce-929d0e0e4736",
+            parent_id="00f067aa0ba902b7",
         )
 
     @mock.patch("osprofiler.web.profiler.init")

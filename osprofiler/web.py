@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import random
+import re
 from typing import Any, TypeGuard, TYPE_CHECKING
 
 from oslo_utils import strutils
@@ -40,14 +41,64 @@ X_TRACE_INFO = "X-Trace-Info"
 #: Http header that will contain the traces data hmac (that will be validated).
 X_TRACE_HMAC = "X-Trace-HMAC"
 
+#: W3C Trace Context traceparent header.
+W3C_TRACEPARENT = "traceparent"
+_W3C_TRACEPARENT_RE = re.compile(
+    r"^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$"
+)
+
+
+def extract_w3c_context(headers: Any) -> tuple[str | None, str | None]:
+    """Extract trace_id and parent_id from W3C traceparent header.
+
+    :param headers: Request headers mapping
+    :returns: Tuple of (trace_id, parent_id) or (None, None)
+    """
+    traceparent = headers.get(W3C_TRACEPARENT) or headers.get("Traceparent")
+    if not traceparent:
+        return None, None
+    match = _W3C_TRACEPARENT_RE.match(traceparent.strip().lower())
+    if match:
+        version, trace_id, parent_id, flags = match.groups()
+        if version != "ff":
+            return trace_id, parent_id
+    return None, None
+
+
+def generate_traceparent(
+    trace_id: str | None = None,
+    parent_id: str | None = None,
+    sampled: bool = True,
+) -> str:
+    """Generate W3C traceparent header."""
+    if trace_id is None:
+        t_id = uuidutils.generate_uuid(dashed=False)
+    else:
+        t_id = trace_id.replace("-", "").zfill(32)[-32:]
+    if parent_id is None:
+        p_id = uuidutils.generate_uuid(dashed=False)[:16]
+    else:
+        p_id = format(utils.shorten_id(parent_id), "016x")
+    flags = "01" if sampled else "00"
+    return f"00-{t_id}-{p_id}-{flags}"
+
 
 def get_trace_id_headers() -> dict[str, str]:
-    """Adds the trace id headers (and any hmac) into provided dictionary."""
+    """Adds trace id headers (HMAC and W3C traceparent) into returned dict."""
     p = profiler.get()
     if p and p.hmac_key:
+        headers: dict[str, str] = {}
+        # W3C traceparent header for OpenTelemetry compatibility
+        base_id = p.get_base_id().replace("-", "")
+        current_id = p.get_id()
+        span_id = format(utils.shorten_id(current_id), "016x")
+        headers[W3C_TRACEPARENT] = generate_traceparent(base_id, span_id)
+
         data = {"base_id": p.get_base_id(), "parent_id": p.get_id()}
         pack = utils.signed_pack(data, p.hmac_key)
-        return {X_TRACE_INFO: pack[0].decode(), X_TRACE_HMAC: pack[1] or ""}
+        headers[X_TRACE_INFO] = pack[0].decode()
+        headers[X_TRACE_HMAC] = pack[1] or ""
+        return headers
     return {}
 
 
@@ -169,6 +220,8 @@ class WsgiMiddleware:
                 keys,
             )
 
+        w3c_trace_id, w3c_parent_id = extract_w3c_context(request.headers)
+
         if not self._trace_is_valid(trace_info):
             # Skip tracing for kubernetes health probes to avoid spamming spans
             if request.headers.get("User-Agent", "").startswith("kube-probe"):
@@ -185,28 +238,40 @@ class WsgiMiddleware:
                 else self.trace_sample_rate
             )
 
-            if not always_trace:
-                return request.get_response(self.application)
-
-            if sample_rate < 1.0 and random.random() >= sample_rate:
-                return request.get_response(self.application)
-
             default_hmac_key = keys[0] if keys else "openstack-profiler"
-            # Support W3C traceparent header (e.g. from Ingress / Gateway / Envoy)
-            tp = request.headers.get("traceparent")
-            if tp and len(tp.split("-")) >= 4:
-                parts = tp.split("-")
+
+            # Option 1: W3C traceparent header is present (e.g. from K8s Ingress / Envoy)
+            if w3c_trace_id and w3c_parent_id:
+                formatted_base_id = (
+                    f"{w3c_trace_id[:8]}-{w3c_trace_id[8:12]}-{w3c_trace_id[12:16]}-"
+                    f"{w3c_trace_id[16:20]}-{w3c_trace_id[20:]}"
+                )
                 trace_info = {
-                    "base_id": parts[1],
-                    "parent_id": parts[2].zfill(32),
                     "hmac_key": default_hmac_key,
+                    "base_id": formatted_base_id,
+                    "parent_id": w3c_parent_id,
                 }
-            else:
+            # Option 2: Always-on tracing for all other requests without headers
+            elif always_trace:
+                if sample_rate < 1.0 and random.random() >= sample_rate:
+                    return request.get_response(self.application)
+
                 trace_info = {
                     "hmac_key": default_hmac_key,
                     "base_id": str(uuidutils.generate_uuid()),
                     "parent_id": None,
                 }
+            else:
+                return request.get_response(self.application)
+        else:
+            # Option 3: Valid OpenStack HMAC trace, correlate with W3C if present
+            if w3c_trace_id:
+                trace_info["base_id"] = (
+                    f"{w3c_trace_id[:8]}-{w3c_trace_id[8:12]}-{w3c_trace_id[12:16]}-"
+                    f"{w3c_trace_id[16:20]}-{w3c_trace_id[20:]}"
+                )
+                if w3c_parent_id:
+                    trace_info["parent_id"] = w3c_parent_id
 
         profiler.init(
             hmac_key=trace_info["hmac_key"],
